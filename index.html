@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dark Halls 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+  canvas { display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/* ============ SETUP ============ */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const CW = 14, CH = 9;                      // maze size in cells
+const W = CW * 2 + 1, H = CH * 2 + 1;       // grid size in tiles (1 tile = 1 unit, so positions are in tiles now)
+let grid, player, enemy, keys, exit, got;
+let state = 'menu';                         // menu | play | pause | dead | win
+let held = {}, msg = '', msgT = 0, flick = 1, target = null, pathT = 0, heart = 0, walkT = 0, time = 0;
+let joy = null, aim = null, touchMode = false;       // touch: joystick (left side), look finger (right side)
+let stam = 1, tired = false, noiseLvl = 0, batt = 1, cells = [], runT = 0, best = 0, newBest = false;
+try { best = +localStorage.getItem('dh_best') || 0; } catch (e) {}
+const fmt = t => Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
+const CHARS = [
+  { id: 'elias', n: 'Elias', cost: 0, ab: 'Flash', cd: 22, d: 'Lantern flash blinds the Warden for 4s if he is in view. Cooldown 22s.' },
+  { id: 'maren', n: 'Sister Maren', cost: 250, ab: 'Holy Ward', cd: 16, d: 'A burst of light shoves him back and stuns him for 3s. Quiet footsteps. Cooldown 16s.' },
+  { id: 'gideon', n: 'Gideon', cost: 500, ab: 'Charge', cd: 14, d: 'Shoulder charge stuns him on hit. Passive Iron Will: survives one catch per run.' },
+  { id: 'vesper', n: 'Vesper', cost: 800, ab: 'Shadow Step', cd: 8, d: 'Dash 5 tiles forward. Quiet footsteps. Cooldown 8s.' },
+  { id: 'oswald', n: 'Oswald', cost: 1200, ab: 'Bear Trap', cd: 4, d: 'Drop a trap: 7s stun when the Warden steps in it. 3 per run.' }];
+let sv = { coins: 0, owned: ['elias'], sel: 'elias', runs: 0, streak: 0 };
+try { Object.assign(sv, JSON.parse(localStorage.getItem('dh_sv') || '{}')); } catch (e) {}
+const saveSv = () => { try { localStorage.setItem('dh_sv', JSON.stringify(sv)); } catch (e) {} };
+const CHR = () => (sv.sel === 'custom' && sv.custom) ? customChar() : CHARS.find(c => c.id === sv.sel) || CHARS[0], QUIET = new Set(['vesper', 'maren']);
+let abCd = 0, shield = 0, traps = [], trapCh = 3, coinsM = [], runCoins = 0, flashT = 0, earned = 0, storeMsg = '';
+let mode = 'pve', room = null, bots = [], me = { g: 0, hp: 100, spd: 1, dmg: 1, col: '#e0b040', ab: 'elias' };
+let php = 100, alive = 1, kills = 0, respT = 0, stunT = 0, gunCd = 0, hurtT = 0, hitMark = 0, firing = 0, pT = 0, over = 0, prot = 0;
+const GUNS = [{ n: 'Pistol', dmg: 24, cd: .38, sp: .01, pel: 1, auto: 0, range: 22, f: 520 }, { n: 'SMG', dmg: 9, cd: .09, sp: .05, pel: 1, auto: 1, range: 16, f: 420 },
+  { n: 'Shotgun', dmg: 11, cd: .85, sp: .13, pel: 6, auto: 0, range: 10, f: 200 }, { n: 'Sniper', dmg: 85, cd: 1.4, sp: 0, pel: 1, auto: 0, range: 40, f: 700 }];
+const PRE = { elias: { g: 0, hp: 100, spd: 1, dmg: 1, col: '#e0b040' }, maren: { g: 1, hp: 90, spd: 1.05, dmg: 1, col: '#e8e8f0' }, gideon: { g: 2, hp: 135, spd: .94, dmg: 1, col: '#c04040' },
+  vesper: { g: 3, hp: 85, spd: 1.1, dmg: 1, col: '#9060d0' }, oswald: { g: 1, hp: 100, spd: 1, dmg: 1, col: '#40b060' } };
+const COLS = [['Gold', '#e0b040'], ['Crimson', '#c04040'], ['Azure', '#4080d0'], ['Jade', '#40b060'], ['Violet', '#9060d0'], ['Ash', '#c8c8d0']], NAMES = ['Rook', 'Nova', 'Ash', 'Wren', 'Vex', 'Juno'], ABS = ['elias', 'maren', 'gideon', 'vesper', 'oswald'];
+const abOf = id => CHARS.find(c => c.id === id) || CHARS[0];
+function customChar() { const c = sv.custom; return { id: 'custom', n: NAMES[c.n] + ' (custom)', ab: abOf(c.ab).ab, cost: 0, cd: abOf(c.ab).cd, d: 'Your hero: ' + GUNS[c.gun].n + ', ' + abOf(c.ab).ab + '. HP +' + c.hp * 15 + ', speed +' + c.spd * 6 + '%, damage +' + c.dmg * 10 + '%.' }; }
+const STORECH = () => sv.custom ? CHARS.concat([customChar()]) : CHARS;
+function FORGE() {
+  const c = sv.custom, back = ['Back', () => state = bk()];
+  if (!c) return [['Unlock Hero Forge  300c', () => { if (sv.coins >= 300) { sv.coins -= 300; sv.custom = { n: 0, col: 0, gun: 0, ab: 'elias', hp: 0, spd: 0, dmg: 0 }; } else storeMsg = 'Need 300 coins'; }], back];
+  const up = (l, k) => [l + ' Lv ' + c[k] + '/4' + (c[k] < 4 ? '  ' + 150 * (c[k] + 1) + 'c' : '  MAX'), () => { const cost = 150 * (c[k] + 1); if (c[k] < 4 && sv.coins >= cost) { sv.coins -= cost; c[k]++; storeMsg = ''; } else if (c[k] < 4) storeMsg = 'Need ' + cost + ' coins'; }];
+  return [['Name: ' + NAMES[c.n], () => c.n = (c.n + 1) % 6], ['Color: ' + COLS[c.col][0], () => c.col = (c.col + 1) % 6], ['Gun: ' + GUNS[c.gun].n, () => c.gun = (c.gun + 1) % 4],
+    ['Ability: ' + abOf(c.ab).ab, () => c.ab = ABS[(ABS.indexOf(c.ab) + 1) % 5]], up('Health', 'hp'), up('Speed', 'spd'), up('Damage', 'dmg'),
+    [sv.sel === 'custom' ? 'EQUIPPED' : 'Equip this hero', () => sv.sel = 'custom'], back];
+}
+let backTo = '';
+const bk = () => { const b = backTo; backTo = ''; return b || 'menu'; };
+const BOTD = [{ n: 'Easy', spd: 1.6, acc: .25, cd: 1.2, dmg: 8, react: .8, sight: 10 }, { n: 'Medium', spd: 2.4, acc: .45, cd: .7, dmg: 11, react: .4, sight: 14 }, { n: 'Hard', spd: 3.2, acc: .7, cd: .4, dmg: 14, react: .15, sight: 20 }];
+const ARENA = () => [
+  ['Bot difficulty: ' + BOTD[sv.botDiff | 0].n, () => sv.botDiff = ((sv.botDiff | 0) + 1) % 3], ['Number of bots: ' + (sv.botN || 3), () => sv.botN = ((sv.botN || 3) % 5) + 1],
+  ['Hero: ' + CHR().n + '  (change)', () => { backTo = 'arena'; state = 'store'; }], ['Build custom hero', () => { backTo = 'arena'; state = 'forge'; }],
+  ['START MATCH', () => startArena()], ['Back', () => state = 'menu']];
+let cfg = { vol: .9, sens: 1, q: 1, diff: 1 };
+try { Object.assign(cfg, JSON.parse(localStorage.getItem('dh_cfg') || '{}')); } catch (e) {}
+const SENS = [.5, .75, 1, 1.5, 2];
+const DIFFS = [
+  { n: 'Easy', d: 'Slower monster, short memory, extra batteries and hiding places.', ms: .8, hear: .7, sight: 6, lose: 2, bat: 6, hide: 6 },
+  { n: 'Normal', d: 'The intended nightmare.', ms: 1, hear: 1, sight: 8, lose: 3, bat: 4, hide: 4 },
+  { n: 'Nightmare', d: 'Faster, sharper ears, long memory. Few places to hide.', ms: 1.25, hear: 1.35, sight: 10, lose: 5, bat: 2, hide: 2 }];
+const D = () => DIFFS[cfg.diff] || DIFFS[1];
+let mx = 0, my = 0, hid = null, spots = [], notes = [], pages = 0, btns = [];
+const DIARY = ['"Hollowmere was an orphanage. Forty children vanished in one winter. The records say fire. The village says the house kept them."',
+  '"I hid in the cabinets when the Warden walked the halls. He cannot see inside. Hide, and he forgets you." (Nell)',
+  '"He hunts by sound. Walk softly. Running wakes the whole house." (Nell)',
+  '"Warden Hale was the orphanage caretaker. When the children began to disappear, he was the one who locked the cellar. Then he stopped leaving it."',
+  '"The keys do not open the cellar. They unlock HIM. Every key you take loosens another chain." (scratched into the wall)',
+  '"Lord Hollowmere promised the house a child every year to keep the dark asleep. The caretaker was the first thing it asked for."',
+  '"Nell wrote her name on every door so the house would remember her. The house remembers everything. That is the problem."',
+  '"Without light the walls move. The lamp batteries hide in the dark corners. Keep your light burning."',
+  '"The green door is not an exit. It is where the house lets one child go each year. Tonight, the child is you."'];
+const WIN2 = 'You read the last page and understand: the Warden was only ever the first prisoner. As the door opens he steps aside and lets you pass. Nell takes your hand. For the first time, the halls are silent.';
+let introI = 0, introT = 0, lastStep = 0, deadLine = '';
+const INTRO = ['Hollowmere Manor, 3 a.m. You followed your little sister Nell\'s trail here. The front doors locked behind you.',
+  'The village says the old caretaker never left. They call him the Warden. He does not sleep. He does not stop.',
+  'Nell\'s note: "Three keys open the cellar door. Do not let him hear you."',
+  'Find the keys. Reach the green door. Stay alive.'];
+INTRO.splice(1, 0, 'Hollowmere was an orphanage once. Forty children vanished in a single winter. The records blame a fire. The village blames the house.');
+INTRO.splice(3, 0, 'The caretaker, Warden Hale, locked the cellar to keep the house quiet. Then he stopped leaving it. He has been walking the halls ever since.');
+const WHISP = ['"Nell..."', 'He counts your steps.', 'Forty children. Forty doors.', 'Do not answer.', 'The house is hungry.', '"Hale, let me out..."', 'Behind you.', 'Every key loosens a chain.'];
+let whT = 20, notesTot = 9;
+const dust = [...Array(50)].map(() => ({ x: Math.random(), y: Math.random(), s: Math.random() }));
+const NOTES = ['KEY 1/3. A tag reads "Nell, East Wing". She was here. Somewhere, the Warden stirs.',
+  'KEY 2/3. Scratched into the stone: "HE HEARS YOUR HEARTBEAT". He moves faster now.',
+  'KEY 3/3. The tag reads "Warden". He wore them all along. The green door is open. Run.'];
+const DEATH = ['Caught! The Warden tucks you back in. Better luck next run.', 'Too slow! Back to the cellar you go.', 'The Warden got you. Try a different character?'];
+const WIN = 'You burst into the cold night air. Nell waits at the gate, alive. Behind you, in the dark doorway, the Warden watches, already counting your footsteps.';
+let proj, planeLen, colW, cols, zbuf, vig;           // 3D camera settings, filled in by resize()
+
+function resize() {
+  cv.width = innerWidth; cv.height = innerHeight;
+  const w = cv.width, h = cv.height;
+  proj = Math.max(w / 1.8, h * .6);          // distance to the "screen" (controls field of view)
+  planeLen = (w / 2) / proj;
+  colW = Math.max(2, Math.round(w / [300, 500, 800][cfg.q]));   // each ray draws a strip this wide (bigger = faster, blockier)
+  cols = Math.ceil(w / colW);
+  zbuf = new Float32Array(cols);             // distance to the wall in each column (so sprites hide behind walls)
+  vig = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * .2, w / 2, h / 2, Math.max(w, h) * .75);
+  vig.addColorStop(0, 'rgba(0,0,0,0)'); vig.addColorStop(1, 'rgba(0,0,0,.8)');
+}
+addEventListener('resize', resize); resize();
+
+/* ============ MAZE (same generator as before) ============ */
+function makeMaze() {
+  grid = Array.from({ length: H }, () => Array(W).fill(1)); // 1 = wall, 0 = floor
+  (function carve(x, y) {
+    grid[y][x] = 0;
+    [[2, 0], [-2, 0], [0, 2], [0, -2]].sort(() => Math.random() - .5).forEach(([ax, ay]) => {
+      const nx = x + ax, ny = y + ay;
+      if (nx > 0 && ny > 0 && nx < W - 1 && ny < H - 1 && grid[ny][nx] === 1) {
+        grid[y + ay / 2][x + ax / 2] = 0;
+        carve(nx, ny);
+      }
+    });
+  })(1, 1);
+  for (let i = 0; i < 40; i++) {            // knock out a few walls so you can run in circles
+    const x = 1 + Math.floor(Math.random() * (W - 2)), y = 1 + Math.floor(Math.random() * (H - 2));
+    if (grid[y][x] === 1 && ((grid[y][x - 1] === 0 && grid[y][x + 1] === 0) ||
+                              (grid[y - 1][x] === 0 && grid[y + 1][x] === 0))) grid[y][x] = 0;
+  }
+}
+
+function start() {
+  mode = 'pve'; makeMaze();
+  player = { x: 1.5, y: 1.5, a: grid[1][2] === 0 ? 0 : Math.PI / 2, r: .25 }; // a = angle you face; start looking down a corridor
+  exit = { tx: W - 2, ty: H - 2 };
+  const open = [];
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++)
+    if (grid[y][x] === 0 && x + y > 12 && !(x === exit.tx && y === exit.ty)) open.push({ x, y });
+  open.sort(() => Math.random() - .5);
+  keys = open.slice(0, 3).map(o => ({ x: o.x + .5, y: o.y + .5, ph: Math.random() * 6 }));
+  const at = (a, b) => open.slice(a, b).map(o => ({ x: o.x + .5, y: o.y + .5 }));
+  cells = at(3, 3 + D().bat); spots = at(12, 12 + D().hide); notes = at(24, 33); notesTot = notes.length; coinsM = at(34, 46); runCoins = 0; hid = null; pages = 0;
+  const far = open.filter(o => o.x + o.y > 25)[0] || { x: W - 2, y: H - 3 };
+  enemy = { x: far.x + .5, y: far.y + .5, mode: 'patrol', stun: 2, lost: 0, last: null, wp: randTile() };
+  got = 0; stam = 1; tired = false; batt = 1; runT = 0; joy = null; abCd = 0; shield = CHR().id === 'gideon' ? 1 : 0; traps = []; trapCh = 3; flashT = 0; aim = null; target = null; pathT = 0; state = 'play';
+  say('Find 3 keys, then reach the green door.');
+}
+
+/* ============ COLLISION ============ */
+function solid(x, y) {
+  const tx = Math.floor(x), ty = Math.floor(y);
+  if (tx === exit.tx && ty === exit.ty && got < 3) return true; // door is locked
+  return grid[ty]?.[tx] !== 0;
+}
+function hits(x, y, r) { return solid(x - r, y - r) || solid(x + r, y - r) || solid(x - r, y + r) || solid(x + r, y + r); }
+function randTile() { let x, y; do { x = 1 + Math.random() * (W - 2) | 0; y = 1 + Math.random() * (H - 2) | 0; } while (grid[y][x] !== 0); return { x: x + .5, y: y + .5 }; }
+function canSee(x0, y0, x1, y1) {
+  const n = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / .2);
+  for (let i = 1; i < n; i++) { const t = i / n; if (grid[Math.floor(y0 + (y1 - y0) * t)]?.[Math.floor(x0 + (x1 - x0) * t)] !== 0) return false; }
+  return true;
+}
+function payout(win) {
+  const base = 5 + Math.min(40, runT / 3 | 0) + got * 15 + pages * 8 + runCoins + (win ? 100 + Math.max(0, 120 - runT | 0) : 0);
+  earned = Math.round(base * (1 + Math.min(1, sv.streak * .1)) * [.8, 1, 1.5][cfg.diff]);
+  sv.coins += earned; sv.runs++; sv.streak = win ? sv.streak + 1 : 0; saveSv();
+}
+function stun(t) { enemy.stun = t; enemy.mode = 'chase'; enemy.last = { x: player.x, y: player.y }; enemy.lost = 0; pathT = 0; }
+function shove(d) {
+  const a = Math.atan2(enemy.y - player.y, enemy.x - player.x);
+  for (let i = 0; i < d * 4; i++) { const nx = enemy.x + Math.cos(a) * .25, ny = enemy.y + Math.sin(a) * .25; if (grid[Math.floor(ny)]?.[Math.floor(nx)] !== 0) break; enemy.x = nx; enemy.y = ny; }
+}
+function dash(n) {
+  let x = player.x, y = player.y;
+  for (let i = 0; i < n * 10; i++) { const nx = x + Math.cos(player.a) * .1, ny = y + Math.sin(player.a) * .1; if (grid[Math.floor(ny)]?.[Math.floor(nx)] !== 0) break; x = nx; y = ny; }
+  player.x = x; player.y = y;
+}
+function useAbility() {
+  if (state !== 'play' || abCd > 0 || hid) return; if (mode === 'pvp') { arenaAbility(); return; }
+  const id = sv.sel === 'custom' && sv.custom ? sv.custom.ab : sv.sel, d = Math.hypot(enemy.x - player.x, enemy.y - player.y);
+  if (id === 'oswald') { if (trapCh <= 0) { say('No traps left.', 1.5); return; } trapCh--; traps.push({ x: player.x, y: player.y }); tone(300, .1, 'square', .15); }
+  else if (id === 'elias') { flashT = .7; noise(.3, 3000, .3); if (d < 9 && canSee(enemy.x, enemy.y, player.x, player.y)) { stun(4); say('The Warden is blinded!', 1.5); } }
+  else if (id === 'maren') { flashT = .5; tone(600, .5, 'sine', .2, 0, 1200); if (d < 7) { shove(4); stun(3); say('Back, Warden!', 1.5); } }
+  else if (id === 'gideon') { dash(3); tone(90, .2, 'sawtooth', .3, 0, 50); if (Math.hypot(enemy.x - player.x, enemy.y - player.y) < 3) { shove(3); stun(3); say('Wham!', 1.2); } }
+  else { dash(5); tone(500, .15, 'sine', .15, 0, 150); }
+  abCd = CHR().cd;
+}
+const G = () => GUNS[me.g];
+function remotes() {
+  if (!room) return bots.filter(b => b.hp > 0);
+  return room.peers().filter(q => !q.sameTab && q.presence.ar === 1 && q.presence.hp > 0).map(q => { const r = q.presence; return { x: +r.x || 0, y: +r.y || 0, c: /^#[0-9a-f]{6}$/i.test(r.c) ? r.c : '#cc3333', mv: r.mv, k: +r.k || 0, peer: q.peer } });
+}
+function arenaStats() {
+  const c = sv.sel === 'custom' && sv.custom;
+  me = c ? { g: c.gun, hp: 100 + 15 * c.hp, spd: 1 + .06 * c.spd, dmg: 1 + .1 * c.dmg, col: COLS[c.col][1], ab: c.ab } : { ...(PRE[sv.sel] || PRE.elias), ab: sv.sel };
+}
+function spawnPoint() {
+  const P = [[2.5, 2.5], [26.5, 2.5], [2.5, 16.5], [26.5, 16.5], [14.5, 4.5], [14.5, 14.5], [4.5, 9.5], [24.5, 9.5]], rs = remotes();
+  return P.map(q => [q, Math.min(99, ...rs.map(r => Math.hypot(r.x - q[0], r.y - q[1])))]).sort((a, b) => b[1] - a[1])[0][0];
+}
+async function startArena() {
+  mode = 'pvp'; arenaStats();
+  grid = Array.from({ length: H }, (_, y) => Array.from({ length: W }, (_, x) => x === 0 || y === 0 || x === W - 1 || y === H - 1 ? 1 : 0));
+  for (const [x, y] of [[6,4],[7,4],[6,5],[7,5],[21,4],[22,4],[21,5],[22,5],[6,13],[7,13],[6,14],[7,14],[21,13],[22,13],[21,14],[22,14],[14,9],[14,8],[13,9],[15,9],[14,10],[10,9],[18,9],[10,3],[18,15],[14,2],[14,16]]) grid[y][x] = 1;
+  exit = { tx: -9, ty: -9 }; keys = []; cells = []; spots = []; notes = []; coinsM = []; traps = []; trapCh = 3; pages = 0; got = 0; hid = null; joy = null; aim = null;
+  enemy = { x: -50, y: -50, mode: 'patrol', stun: 1e9, lost: 0, last: null, wp: { x: -50, y: -50 } };
+  runT = 0; batt = 1; stam = 1; tired = false; abCd = 0; flashT = 0; hurtT = 0; kills = 0; over = 0; php = me.hp; alive = 1; stunT = 0; prot = 2; earned = 0;
+  const sp = spawnPoint(); player = { x: sp[0], y: sp[1], a: 0, r: .25 }; state = 'play';
+  room = null;
+  bots = Array.from({ length: (sv.botN | 0) || 3 }, (_, i) => { const t = randTile(); return { x: t.x, y: t.y, tx: t.x, ty: t.y, c: COLS[(i + 2) % 6][1], mv: 1, hp: 100, k: 0, peer: 'bot' + i, name: 'Bot ' + (i + 1), dead: 0, cd: 1, seen: 0, st: 0 }; });
+  say('Bot match (' + BOTD[sv.botDiff | 0].n + '): first to 10 kills. Click = shoot, F = ability.', 5);
+}
+function takeHit(d, from) {
+  if (prot > 0) return; php -= d; hurtT = .35; tone(110, .15, 'sawtooth', .2);
+  if (php <= 0) { alive = 0; php = 0; respT = 3; room?.emit('dead', { by: from }); const bkl = bots.find(q => q.peer === from); if (bkl) bkl.k++; say('Eliminated. Respawning...', 3); room?.presence({ hp: 0 }); }
+}
+function fire() {
+  const g = G(); if (!alive || gunCd > 0 || stunT > 0 || state !== 'play' || mode !== 'pvp') return; gunCd = g.cd; noise(.1, 1200, .3); tone(g.f, .12, 'square', .1, 0, g.f / 3);
+  for (let p = 0; p < g.pel; p++) {
+    const a = player.a + (Math.random() - .5) * g.sp * 2, ca = Math.cos(a), sa = Math.sin(a); let bt = g.range;
+    for (let t = .2; t < g.range; t += .1) if (solid(player.x + ca * t, player.y + sa * t)) { bt = t; break; }
+    let best = null;
+    for (const r of remotes()) { const dx = r.x - player.x, dy = r.y - player.y, t = dx * ca + dy * sa; if (t > 0 && t < bt && Math.abs(-dx * sa + dy * ca) < .35) { bt = t; best = r; } }
+    if (!best) continue; hitMark = .2; const dmg = Math.round(g.dmg * me.dmg * (1 - bt / g.range * .3));
+    if (best.peer.startsWith('bot')) { best.hp -= dmg; if (best.hp <= 0) { kills++; best.dead = 3; tone(900, .15, 'square', .12); } } else room?.emit('hit', { to: best.peer, d: dmg });
+  }
+}
+function arenaAbility() {
+  if (!alive) return; const id = me.ab;
+  if (id === 'elias') { flashT = .6; bots.forEach(b => { if (Math.hypot(b.x - player.x, b.y - player.y) < 8) b.stun = 2; }); }
+  else if (id === 'maren') { php = Math.min(me.hp, php + 40); tone(700, .4, 'sine', .2, 0, 1200); }
+  else if (id === 'oswald') { if (trapCh <= 0) { say('No mines left.', 1.5); return; } trapCh--; traps.push({ x: player.x, y: player.y }); tone(300, .1, 'square', .15); }
+  else { dash(id === 'vesper' ? 5 : 4); tone(500, .15, 'sine', .15, 0, 150); }
+  abCd = abOf(id).cd;
+}
+function botsTick(dt) {
+  const B = BOTD[sv.botDiff | 0] || BOTD[1];
+  for (const b of bots) {
+    if (b.hp <= 0) { if ((b.dead -= dt) <= 0) { let t, n = 0; do { t = randTile(); } while (Math.hypot(t.x - player.x, t.y - player.y) < 8 && ++n < 20); Object.assign(b, { x: t.x, y: t.y, tx: t.x, ty: t.y, hp: 100, seen: 0, cd: 1 }); } continue; }
+    if ((b.stun -= dt) > 0) continue;
+    const dx = player.x - b.x, dy = player.y - b.y, d = Math.hypot(dx, dy), see = alive && d < B.sight && canSee(b.x, b.y, player.x, player.y);
+    b.seen = see ? b.seen + dt : 0; b.cd -= dt; if (see) { b.tx = player.x; b.ty = player.y; }
+    let mx2 = b.tx - b.x, my2 = b.ty - b.y;
+    if (see && d < 6) { b.st = b.st || (Math.random() < .5 ? 1 : -1); mx2 = B.spd < 2 ? 0 : -dy * b.st; my2 = B.spd < 2 ? 0 : dx * b.st; }
+    else if (Math.hypot(mx2, my2) < .5) { const t = randTile(); b.tx = t.x; b.ty = t.y; }
+    const m = Math.hypot(mx2, my2) || 1, nx = b.x + mx2 / m * B.spd * dt, ny = b.y + my2 / m * B.spd * dt;
+    if (!solid(nx, ny)) { b.x = nx; b.y = ny; } else { b.st = -(b.st || 1); const t = randTile(); b.tx = t.x; b.ty = t.y; }
+    if (see && b.seen > B.react && b.cd <= 0) { b.cd = B.cd * (.8 + Math.random() * .4); tone(300, .08, 'square', .06); if (Math.random() < B.acc * (1 - d / 28)) takeHit(B.dmg, b.peer); }
+  }
+}
+function arenaTick(dt, sprint, moving) {
+  if (msgT > 0) msgT -= dt; batt = 1; stunT = Math.max(0, stunT - dt); gunCd = Math.max(0, gunCd - dt); hurtT = Math.max(0, hurtT - dt); hitMark = Math.max(0, hitMark - dt); prot = Math.max(0, prot - dt);
+  if (!alive) { if ((respT -= dt) <= 0) { const sp = spawnPoint(); player.x = sp[0]; player.y = sp[1]; php = me.hp; alive = 1; prot = 2; trapCh = 3; } }
+  else if (firing && G().auto) fire();
+  botsTick(dt);
+  traps = traps.filter(tp => { const r = remotes().find(q => Math.hypot(q.x - tp.x, q.y - tp.y) < .8); if (!r) return true; const bb = bots.find(q => q.peer === r.peer); if (bb) { bb.hp -= 55; if (bb.hp <= 0) { kills++; bb.dead = 3; } } tone(160, .3, 'square', .25, 0, 60); return false; });
+  if (!over) {
+    const top = Math.max(kills, ...remotes().map(r => r.k), ...bots.map(b => b.k));
+    if (top >= 10) { over = 1; const won = kills >= 10; earned = Math.round((kills * 10 + (won ? 100 : 20)) * [.6, .9, 1.3][sv.botDiff | 0]); sv.coins += earned; sv.runs++; saveSv(); deadLine = won ? 'You reached 10 kills first. The arena is yours!' : 'A bot reached 10 kills first. Rematch?'; state = won ? 'win' : 'dead'; document.exitPointerLock?.(); }
+  }
+  if ((pT -= dt) <= 0 && room) { pT = .05; room.presence({ ar: 1, x: +player.x.toFixed(2), y: +player.y.toFixed(2), hp: alive ? Math.max(1, php | 0) : 0, c: me.col, mv: moving ? 1 : 0, k: kills }); }
+}
+function pvpHud(w, h) {
+  const sx = w / 2, sy = h / 2, c = hitMark > 0 ? '#ff4040' : '#fff';
+  ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(sx - 8, sy); ctx.lineTo(sx - 3, sy); ctx.moveTo(sx + 3, sy); ctx.lineTo(sx + 8, sy); ctx.moveTo(sx, sy - 8); ctx.lineTo(sx, sy - 3); ctx.moveTo(sx, sy + 3); ctx.lineTo(sx, sy + 8); ctx.stroke();
+  const ent = [{ k: kills, c: me.col, t: 'YOU' }, ...(room ? remotes().map((r, i) => ({ k: r.k, c: r.c, t: 'P' + (i + 1) })) : bots.map(b => ({ k: b.k, c: b.c, t: b.name })))].sort((a, b) => b.k - a.k);
+  const fs = Math.min(13, (w - 20) / (ent.reduce((n, r) => n + r.t.length + 5, 0) * .62)); ctx.font = fs + 'px monospace'; ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, 0, w, 24);
+  const tw = ent.map(r => ctx.measureText('● ' + r.t + ' ' + r.k).width + 18); let x0 = (w - tw.reduce((a, b) => a + b, 0)) / 2;
+  ent.forEach((r, i) => { ctx.fillStyle = r.c; ctx.fillText('●', x0, 16); ctx.fillStyle = r.t === 'YOU' ? '#fff' : '#ccc'; ctx.fillText(r.t + ' ' + r.k, x0 + fs * 1.1, 16); x0 += tw[i]; });
+  ctx.font = '13px monospace';
+  ctx.textAlign = 'center'; ctx.fillStyle = '#ddd'; ctx.fillText(G().n + (stunT > 0 ? '  STUNNED' : '') + (prot > 0 ? '  (protected)' : ''), sx, h - 24);
+  if (!alive) { ctx.fillStyle = '#e66'; ctx.font = '22px Georgia, serif'; ctx.fillText('Respawning in ' + Math.ceil(respT), sx, sy + 60); }
+  if (touchMode) { ctx.strokeStyle = '#e66'; ctx.beginPath(); ctx.arc(w - 60, h - 80, 40, 0, 7); ctx.stroke(); ctx.fillStyle = '#e66'; ctx.fillText('FIRE', w - 60, h - 76); }
+  ctx.textAlign = 'left'; ctx.font = '16px monospace';
+}
+const avC = {};
+function avatar(col, i) {
+  return avC[col + i] ||= makeImg(50, 90, c => {
+    const sw = [-5, 0, 5, 0][i]; c.lineCap = 'round'; c.strokeStyle = '#111'; c.lineWidth = 6; c.beginPath(); c.moveTo(20, 55); c.lineTo(18 + sw, 86); c.moveTo(30, 55); c.lineTo(32 - sw, 86); c.stroke();
+    c.fillStyle = col; c.fillRect(14, 28, 22, 30); c.strokeStyle = 'rgba(255,255,255,.5)'; c.lineWidth = 1.5; c.strokeRect(14, 28, 22, 30);
+    c.fillStyle = '#d8b090'; c.beginPath(); c.arc(25, 18, 10, 0, 7); c.fill(); c.fillStyle = '#222'; c.fillRect(30, 36, 18, 5);
+  });
+}
+addEventListener('mousedown', e => { if (state === 'play' && e.clientX > innerWidth - 100 && e.clientY > 36 && e.clientY < 62) { toMenu(); return; } if (mode === 'pvp' && state === 'play' && e.button === 0) { firing = 1; fire(); } });
+addEventListener('mouseup', () => firing = 0);
+addEventListener('touchstart', e => { if (state === 'play') for (const t of e.changedTouches) if (t.clientX > innerWidth - 100 && t.clientY > 36 && t.clientY < 62) { toMenu(); return; } if (mode === 'pvp' && state === 'play') for (const t of e.changedTouches) if (t.clientX > innerWidth - 120 && t.clientY > innerHeight - 140) fire(); });
+function say(s, t = 3) { msg = s; msgT = t; }
+
+/* ============ MONSTER AI (finds the shortest path to you) ============ */
+function findTarget(gx, gy) {
+  const sx = Math.floor(enemy.x), sy = Math.floor(enemy.y);
+  if (sx === gx && sy === gy) return { x: gx + .5, y: gy + .5 };
+  const prev = new Map([[sy * W + sx, null]]), q = [[sx, sy]];
+  for (let i = 0; i < q.length; i++) {
+    const [x, y] = q[i];
+    if (x === gx && y === gy) break;
+    for (const [ax, ay] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + ax, ny = y + ay;
+      if (grid[ny]?.[nx] === 0 && !prev.has(ny * W + nx)) { prev.set(ny * W + nx, [x, y]); q.push([nx, ny]); }
+    }
+  }
+  if (!prev.has(gy * W + gx)) return null;
+  let cur = [gx, gy];
+  while (true) { const p = prev.get(cur[1] * W + cur[0]); if (p[0] === sx && p[1] === sy) break; cur = p; }
+  return { x: cur[0] + .5, y: cur[1] + .5 };
+}
+
+/* ============ UPDATE ============ */
+function update(dt) {
+  // W/S = forward/back, A/D = strafe, arrows or Q/E = turn, mouse = look
+  let fwd = (held.w || held.arrowup ? 1 : 0) - (held.s || held.arrowdown ? 1 : 0);
+  let str = (held.d ? 1 : 0) - (held.a ? 1 : 0);
+  player.a += ((held.e || held.arrowright ? 1 : 0) - (held.q || held.arrowleft ? 1 : 0)) * 2.4 * dt;
+  if (joy) {                                     // touch joystick: push further = move faster
+    const jx = joy.x - joy.ox, jy = joy.y - joy.oy, jd = Math.hypot(jx, jy);
+    if (jd > 8) { str += jx / Math.max(jd, 60); fwd -= jy / Math.max(jd, 60); }
+  }
+  if (hid) { fwd = 0; str = 0; }
+  const moving = fwd || str, push = joy ? Math.hypot(joy.x - joy.ox, joy.y - joy.oy) : 0;
+  const sprint = !!((held.shift || push > 58) && moving && stam > .02 && !tired);   // sprinting is fast but LOUD
+  stam = sprint ? stam - dt * .28 : Math.min(1, stam + dt * (moving ? .12 : .25));
+  if (stam <= .02) tired = true; else if (tired && stam > .3) tired = false;
+  noiseLvl = (sprint ? 9 : moving ? 3.5 : .8) * (QUIET.has(sv.sel) ? .6 : 1);                 // how far away the monster can hear you
+  runT += dt; abCd = Math.max(0, abCd - dt); flashT = Math.max(0, flashT - dt * 1.5); batt = Math.max(0, batt - dt * .009);
+  const len = Math.max(1, Math.hypot(fwd, str)), speed = (sprint ? 4.6 : 2.9) * (mode === 'pvp' ? (alive && stunT <= 0 ? me.spd : 0) : 1);       // tiles per second
+  const ca = Math.cos(player.a), sa = Math.sin(player.a);
+  const vx = (ca * fwd - sa * str) / len * speed * dt, vy = (sa * fwd + ca * str) / len * speed * dt;
+  const nx = player.x + vx; if (!hits(nx, player.y, player.r)) player.x = nx;
+  const ny = player.y + vy; if (!hits(player.x, ny, player.r)) player.y = ny;
+  if (fwd || str) { walkT += dt * (sprint ? 13 : 9); const n = Math.floor(walkT / Math.PI); if (n !== lastStep) { lastStep = n; step(); } }
+  if (mode === 'pvp') { arenaTick(dt, sprint, moving); return; }
+                                    // head bob
+
+  keys = keys.filter(k => {
+    if (Math.hypot(k.x - player.x, k.y - player.y) < .5) {
+      got++; chime(); tone(80, 1.2, 'sawtooth', .22, .5, 45); if (got === 3) unlockSnd();
+      say(NOTES[got - 1], 6);
+      return false;
+    }
+    return true;
+  });
+
+  notes = notes.filter(n => {
+    if (Math.hypot(n.x - player.x, n.y - player.y) > .5) return true;
+    tone(300, .25, 'triangle', .12); tone(240, .4, 'triangle', .1, .1); say('PAGE ' + (pages + 1) + '. ' + DIARY[pages++], 9); return false;
+  });
+  coinsM = coinsM.filter(c => { if (Math.hypot(c.x - player.x, c.y - player.y) > .5) return true; runCoins += 5; tone(1200, .08, 'square', .08); return false; });
+  cells = cells.filter(c => {
+    if (Math.hypot(c.x - player.x, c.y - player.y) > .5) return true;
+    batt = Math.min(1, batt + .5); tone(520, .15, 'square', .1); tone(780, .2, 'square', .1, .1); say('Battery. Your light brightens.', 2); return false;
+  });
+  if (got < 3 && Math.hypot(exit.tx + .5 - player.x, exit.ty + .5 - player.y) < 1.2 && msgT <= 0) say('The door is locked. Find all 3 keys.');
+
+  const dist = Math.hypot(enemy.x - player.x, enemy.y - player.y);
+  traps = traps.filter(tp => { if (Math.hypot(tp.x - enemy.x, tp.y - enemy.y) > .8) return true; stun(7); say('Trapped!', 1.5); tone(180, .3, 'square', .3, 0, 60); return false; });
+  const seen = !hid && dist < D().sight && canSee(enemy.x, enemy.y, player.x, player.y), heard = !hid && dist < noiseLvl * D().hear;
+  if (seen || heard) {                                           // spotted: he freezes to roar, then hunts
+    if (enemy.mode !== 'chase') { enemy.stun = .9; pathT = 0; tone(70, .9, 'sawtooth', .35, 0, 35); noise(.5, 600, .3); say('He has found you. RUN.', 2); }
+    enemy.mode = 'chase'; enemy.last = { x: player.x, y: player.y }; enemy.lost = 0;
+  } else if (enemy.mode === 'chase' && (enemy.lost += dt) > D().lose) { enemy.mode = 'search'; pathT = 0; }   // lost you: checks where he last saw you
+  const goal = enemy.mode === 'patrol' ? enemy.wp : enemy.last;
+  if (Math.hypot(goal.x - enemy.x, goal.y - enemy.y) < .6) { if (enemy.mode === 'search') enemy.mode = 'patrol'; enemy.wp = randTile(); pathT = 0; }
+  if (enemy.stun > 0) enemy.stun -= dt;
+  else {
+    pathT -= dt;
+    if (pathT <= 0) {
+      pathT = .25; const g = enemy.mode === 'patrol' ? enemy.wp : enemy.last;
+      target = findTarget(Math.floor(g.x), Math.floor(g.y));
+      if (enemy.mode === 'chase' && Math.floor(enemy.x) === Math.floor(player.x) && Math.floor(enemy.y) === Math.floor(player.y)) target = { x: player.x, y: player.y };
+    }
+    if (target) {
+      const d = Math.hypot(target.x - enemy.x, target.y - enemy.y) || 1;
+      const es = enemy.mode === 'chase' ? 2.1 + got * .5 : enemy.mode === 'search' ? 1.6 : 1.2;
+      const step = Math.min(es * D().ms * dt, d);
+      enemy.x += (target.x - enemy.x) / d * step; enemy.y += (target.y - enemy.y) / d * step;
+    }
+  }
+  if (dist < .55 && !hid && shield) { shield = 0; stun(5); shove(4); say('Iron Will! You shrug him off.', 2); tone(120, .4, 'square', .2, 0, 60); } else if (dist < .55 && !hid) { state = 'dead'; scare(); payout(false); deadLine = DEATH[Math.random() * DEATH.length | 0]; }
+  if (got >= 3 && Math.floor(player.x) === exit.tx && Math.floor(player.y) === exit.ty) { state = 'win'; winSnd(); payout(true); newBest = !best || runT < best; if (newBest) { best = runT; try { localStorage.setItem('dh_best', best); } catch (e) {} } }
+
+  heart -= dt;                                   // heartbeat gets faster when the monster is close
+  monAudio(dist, dt); if ((whT -= dt) <= 0 && msgT <= 0) { whT = 25 + Math.random() * 20; say(WHISP[Math.random() * WHISP.length | 0], 3); } if (heart <= 0) { thump(); heart = Math.max(.4, Math.min(1.6, dist * .185)); }
+  flick = Math.random() < .02 + Math.max(0, 1 - dist / 6) * .2 ? .35 + Math.random() * .3 : Math.min(1, flick + dt * 4); // flashlight flicker
+  msgT -= dt;
+}
+
+/* ============ 3D: RAYCASTING ============ */
+// Shoots one ray through the grid and reports the first wall it hits (DDA algorithm).
+const R = { d: 0, side: 0, wx: 0, type: 1, mx: 0, my: 0 };
+function cast(rx, ry) {
+  let mx = Math.floor(player.x), my = Math.floor(player.y);
+  const ddx = Math.abs(1 / rx), ddy = Math.abs(1 / ry);
+  let stepX, stepY, sdx, sdy, side = 0, type = 1;
+  if (rx < 0) { stepX = -1; sdx = (player.x - mx) * ddx; } else { stepX = 1; sdx = (mx + 1 - player.x) * ddx; }
+  if (ry < 0) { stepY = -1; sdy = (player.y - my) * ddy; } else { stepY = 1; sdy = (my + 1 - player.y) * ddy; }
+  for (let n = 0; n < 80; n++) {
+    if (sdx < sdy) { sdx += ddx; mx += stepX; side = 0; } else { sdy += ddy; my += stepY; side = 1; }
+    if (grid[my]?.[mx] !== 0) { type = 1; break; }                  // wall
+    if (mx === exit.tx && my === exit.ty) { type = 2; break; }       // the door
+  }
+  const d = side ? sdy - ddy : sdx - ddx;                           // perpendicular distance (no fisheye)
+  const wx = side ? player.x + d * rx : player.y + d * ry;
+  R.d = Math.max(.01, d); R.side = side; R.wx = wx - Math.floor(wx); R.type = type; R.mx = mx; R.my = my;
+}
+
+// How bright is something at this distance? `off` is how far from screen center it is (-1..1).
+function lightAt(dist, off) {
+  if (mode === 'pvp') return Math.max(.22, 1 - dist / 24);
+  const range = 7.5 * flick * (.35 + .65 * batt);
+  let l = Math.max(0, 1 - dist / range); l *= l * 1.6;               // flashlight falls off with distance
+  const cone = 1 / (1 + (off * planeLen * 2.2) ** 2);               // brightest where you're looking
+  const glow = Math.max(0, 1 - dist / 2.2) * .45;                   // small glow around you
+  return Math.min(1, Math.max(l * cone, glow) + .01);
+}
+const hash = (x, y) => (((x * 73856093) ^ (y * 19349663)) >>> 0) % 100 / 100;
+
+/* ============ SPRITES (keys + monster are flat pictures that always face you) ============ */
+function makeImg(w, h, fn) { const c = document.createElement('canvas'); c.width = w; c.height = h; fn(c.getContext('2d')); return c; }
+const monImg = makeImg(70, 100, c => {
+  c.fillStyle = '#101016'; c.strokeStyle = '#5a5a70'; c.lineWidth = 2;
+  c.beginPath(); c.arc(35, 20, 13, 0, 7); c.fill(); c.stroke();                                    // head
+  c.beginPath(); c.moveTo(20, 34); c.quadraticCurveTo(35, 30, 50, 34); c.lineTo(60, 70);
+  c.lineTo(54, 98); c.lineTo(44, 98); c.lineTo(40, 72); c.lineTo(30, 72); c.lineTo(26, 98);
+  c.lineTo(16, 98); c.lineTo(10, 70); c.closePath(); c.fill(); c.stroke();                         // body
+  c.beginPath(); c.moveTo(20, 36); c.lineTo(4, 64); c.lineTo(8, 88); c.lineTo(14, 86); c.lineTo(12, 66); c.lineTo(24, 46); c.fill(); c.stroke(); // arms
+  c.beginPath(); c.moveTo(50, 36); c.lineTo(66, 64); c.lineTo(62, 88); c.lineTo(56, 86); c.lineTo(58, 68); c.lineTo(46, 46); c.fill(); c.stroke();
+});
+const eyeImg = makeImg(70, 100, c => {
+  c.fillStyle = '#ff2020'; c.shadowColor = '#f00'; c.shadowBlur = 10;
+  [28, 42].forEach(x => { c.beginPath(); c.ellipse(x, 20, 3.5, 2.5, 0, 0, 7); c.fill(); });
+});
+const monFr = [...Array(25)].map((_, i) => {                          // 12 walk + 12 hunting (hunched, reaching) + 1 roar frame
+  const roar = i === 24, hunt = i >= 12 && !roar, ph = (i % 12) / 12 * 6.283;
+  const sw = roar ? 0 : (hunt ? 10 : 7) * Math.sin(ph), br = Math.sin(ph * 2) * 1.2, tl = roar ? 0 : 2 * Math.sin(ph * 2), lean = hunt ? 5 : 0, hy = (roar ? 16 : 22) + (hunt ? 3 : 0), hx = 35 + tl + lean;
+  const b = makeImg(70, 100, c => {
+    c.lineCap = c.lineJoin = 'round';
+    const limb = (q, w) => { c.strokeStyle = '#555570'; c.lineWidth = w + 1.6; c.beginPath(); q.forEach(([x, y], k) => k ? c.lineTo(x, y) : c.moveTo(x, y)); c.stroke(); c.strokeStyle = '#08080c'; c.lineWidth = w; c.stroke(); };
+    limb([[30, 70], [28 + sw, 84], [26 + sw, 98]], 3.4); limb([[40, 70], [42 - sw, 84], [44 - sw, 98]], 3.4);
+    c.beginPath(); c.moveTo(22 + lean, 36); c.lineTo(35 + lean, 31 + br * .3); c.lineTo(48 + lean, 36); c.lineTo(58, 88 + br);   // tattered cloak
+    for (let k = 1; k < 7; k++) c.lineTo(58 - k * 7.5, 88 + br + (k % 2 ? 8 : 0) + Math.sin(ph + k) * 2.5);
+    c.lineTo(12, 90); c.closePath();
+    const g = c.createLinearGradient(0, 30, 0, 96); g.addColorStop(0, '#1d1d28'); g.addColorStop(1, '#050507'); c.fillStyle = g; c.fill(); c.strokeStyle = '#4a4a60'; c.lineWidth = 1.4; c.stroke();
+    const A = roar ? [[8, 42, 3, 16], [62, 42, 67, 16]] : hunt ? [[12, 54, 7 - sw * .3, 70], [58, 54, 63 + sw * .3, 70]] : [[15 - sw * .4, 60, 11 - sw * .6, 82 + br], [55 + sw * .4, 60, 59 + sw * .6, 82 + br]];
+    A.forEach(([ex, ey, x2, y2], k) => { limb([[k ? 47 + lean : 23 + lean, 38], [ex, ey], [x2, y2]], 3.6); for (let f = -1; f <= 1; f++) limb([[x2, y2], [x2 + f * 2.5, y2 + 6]], 1.4); });   // arms + claws
+    c.beginPath(); c.ellipse(hx, hy, 9, 12, tl * .03, 0, 7); c.fillStyle = '#14141b'; c.fill(); c.strokeStyle = '#4a4a60'; c.lineWidth = 1.4; c.stroke();
+    for (let k = -2; k <= 2; k++) limb([[hx + k * 3.6, hy - 10], [hx + k * 5.5, hy - 19 - (k % 2 ? 0 : 3)]], 1.2);   // crown of nails
+  });
+  const e = makeImg(70, 100, c => {
+    c.shadowColor = '#f00'; c.shadowBlur = 9; c.fillStyle = '#ff2a2a';
+    [-3.6, 3.6].forEach(k => { c.beginPath(); c.ellipse(hx + k, hy - 2, 1.9, roar ? 2.8 : 1.6, 0, 0, 7); c.fill(); });
+    if (hunt || roar) { c.beginPath(); c.ellipse(hx, hy + 7, 4, roar ? 4 : 1.6, 0, 0, 7); c.fillStyle = '#a00'; c.fill(); }
+  });
+  return { b, e };
+});
+function texData(fn) { const c = makeImg(64, 64, fn); return c.getContext('2d').getImageData(0, 0, 64, 64).data; }
+const floorTex = texData(c => {
+  const r = rnd(7); c.fillStyle = '#0d0d10'; c.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 4; i++) { const x = (i % 2) * 32, y = (i >> 1) * 32, k = 52 + r() * 36 | 0; c.fillStyle = `rgb(${k},${k - 2},${k + 6})`; c.fillRect(x + 2, y + 2, 28, 28); c.fillStyle = 'rgba(255,255,255,.07)'; c.fillRect(x + 2, y + 2, 28, 1); c.fillStyle = 'rgba(0,0,0,.35)'; c.fillRect(x + 2, y + 29, 28, 1); }
+  for (let i = 0; i < 260; i++) { c.fillStyle = r() < .5 ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.2)'; c.fillRect(r() * 64, r() * 64, 1 + r() * 2, 1); }
+});
+const ceilTex = texData(c => {
+  const r = rnd(11);
+  for (let y = 0; y < 4; y++) { const k = 36 + r() * 18 | 0; c.fillStyle = `rgb(${k + 16},${k},${k - 8})`; c.fillRect(0, y * 16, 64, 15); c.fillStyle = '#000'; c.fillRect(0, y * 16 + 15, 64, 1); for (let j = 0; j < 8; j++) { c.fillStyle = 'rgba(0,0,0,.25)'; c.fillRect(r() * 64, y * 16 + r() * 14, 10 + r() * 20, 1); } }
+});
+const grainC = makeImg(128, 128, c => { const d = c.createImageData(128, 128); for (let i = 0; i < d.data.length; i += 4) { d.data[i] = d.data[i + 1] = d.data[i + 2] = Math.random() * 255; d.data[i + 3] = 255; } c.putImageData(d, 0, 0); });
+let fc, fx, fd;
+function castFloor(w, h, hz) {                      // perspective-correct textured floor + ceiling, lit by the flashlight
+  const fw = Math.max(80, cols >> 1), fh = Math.ceil(h / 3);
+  if (!fc || fc.width !== fw || fc.height !== fh) { fc = document.createElement('canvas'); fc.width = fw; fc.height = fh; fx = fc.getContext('2d'); fd = fx.createImageData(fw, fh); }
+  const d = fd.data, ca = Math.cos(player.a), sa = Math.sin(player.a), px = -sa * planeLen, py = ca * planeLen;
+  for (let y = 0; y < fh; y++) {
+    const dy = y * 3 + 1.5 - hz, flr = dy > 0, ady = Math.abs(dy), tex = flr ? floorTex : ceilTex;
+    for (let x = 0; x < fw; x++) {
+      const o = (y * fw + x) * 4; d[o + 3] = 255;
+      if (ady < 1.5) { d[o] = d[o + 1] = d[o + 2] = 0; continue; }
+      const dist = proj / (2 * ady), camX = 2 * (x + .5) / fw - 1, wx = player.x + (ca + px * camX) * dist, wy = player.y + (sa + py * camX) * dist;
+      const l = lightAt(dist, camX) * (flr ? 1 : .8), tx = (wx - Math.floor(wx)) * 64 | 0, ty = (wy - Math.floor(wy)) * 64 | 0, ti = (ty * 64 + tx) * 4;
+      let r = tex[ti], g = tex[ti + 1], b = tex[ti + 2];
+      if (flr && hash(Math.floor(wx), Math.floor(wy)) < .08 && (tx - 32) ** 2 + (ty - 32) ** 2 < 420) { r *= 1.9; g *= .4; b *= .4; }   // old bloodstains
+      d[o] = r * l; d[o + 1] = g * l; d[o + 2] = b * l * 1.05;
+    }
+  }
+  fx.putImageData(fd, 0, 0); ctx.imageSmoothingEnabled = true; ctx.drawImage(fc, 0, 0, w, h);
+}
+const lockImg = makeImg(50, 90, c => {
+  c.fillStyle = '#2a1d14'; c.fillRect(0, 0, 50, 90); c.strokeStyle = '#4a3322'; c.lineWidth = 2; c.strokeRect(1, 1, 48, 88);
+  c.fillStyle = '#120c08'; for (let y = 14; y < 50; y += 7) c.fillRect(10, y, 30, 3);
+  c.fillStyle = '#c9a227'; c.fillRect(38, 56, 4, 10);
+});
+const pageImg = makeImg(30, 40, c => {
+  c.fillStyle = '#e8e0c8'; c.fillRect(8, 8, 14, 20); c.fillStyle = '#6a5a40'; for (let y = 12; y < 26; y += 4) c.fillRect(10, y, 10, 1);
+});
+const coinImg = makeImg(24, 24, c => { c.fillStyle = '#f1c40f'; c.beginPath(); c.arc(12, 12, 9, 0, 7); c.fill(); c.strokeStyle = '#8a6d00'; c.lineWidth = 2; c.stroke(); c.fillStyle = '#8a6d00'; c.fillRect(11, 7, 2, 10); });
+const trapImg = makeImg(40, 16, c => { c.fillStyle = '#222'; c.beginPath(); c.ellipse(20, 10, 18, 5, 0, 0, 7); c.fill(); c.fillStyle = '#aaa'; for (let i = 0; i < 6; i++) { c.beginPath(); c.moveTo(6 + i * 5.5, 10); c.lineTo(8.5 + i * 5.5, 2); c.lineTo(11 + i * 5.5, 10); c.fill(); } });
+const batImg = makeImg(30, 40, c => {
+  const g = c.createRadialGradient(15, 20, 1, 15, 20, 15); g.addColorStop(0, 'rgba(120,255,160,.5)'); g.addColorStop(1, 'rgba(120,255,160,0)');
+  c.fillStyle = g; c.fillRect(0, 0, 30, 40);
+  c.fillStyle = '#2d8a4e'; c.fillRect(10, 12, 10, 18); c.fillStyle = '#ccc'; c.fillRect(12, 9, 6, 3); c.fillStyle = '#f1c40f'; c.fillRect(10, 18, 10, 3);
+});
+const keyImg = makeImg(40, 40, c => {
+  const g = c.createRadialGradient(20, 20, 2, 20, 20, 20);
+  g.addColorStop(0, 'rgba(241,196,15,.55)'); g.addColorStop(1, 'rgba(241,196,15,0)');
+  c.fillStyle = g; c.fillRect(0, 0, 40, 40);
+  c.strokeStyle = '#f1c40f'; c.lineWidth = 3;
+  c.beginPath(); c.arc(11, 20, 5.5, 0, 7); c.stroke();
+  c.beginPath(); c.moveTo(16.5, 20); c.lineTo(32, 20); c.moveTo(27, 20); c.lineTo(27, 26); c.moveTo(32, 20); c.lineTo(32, 25); c.stroke();
+});
+
+function rnd(s) { return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+const wallTex = makeImg(192, 64, c => {                              // 3 stone variants: plain, mossy, cracked + bloodstained
+  for (let v = 0; v < 3; v++) {
+    const r = rnd(v * 977 + 5), ox = v * 64;
+    c.save(); c.beginPath(); c.rect(ox, 0, 64, 64); c.clip();
+    c.fillStyle = '#14141a'; c.fillRect(ox, 0, 64, 64);
+    for (let row = 0; row < 4; row++) for (let bx = (row % 2 ? 8 : 0) - 32; bx < 64; bx += 32) {
+      const k = 62 + r() * 34 | 0, y = row * 16;
+      c.fillStyle = `rgb(${k},${k},${k + 9})`; c.fillRect(ox + bx + 1, y + 1, 30, 14);
+      c.fillStyle = 'rgba(255,255,255,.1)'; c.fillRect(ox + bx + 1, y + 1, 30, 1);
+      c.fillStyle = 'rgba(0,0,0,.35)'; c.fillRect(ox + bx + 1, y + 14, 30, 1);
+    }
+    for (let i = 0; i < 120; i++) { c.fillStyle = r() < .5 ? 'rgba(255,255,255,.07)' : 'rgba(0,0,0,.18)'; c.fillRect(ox + r() * 64, r() * 64, 1 + r() * 2, 1); }
+    if (v === 1) for (let i = 0; i < 16; i++) { c.fillStyle = `rgba(${30 + r() * 30 | 0},${80 + r() * 40 | 0},35,.45)`; c.beginPath(); c.arc(ox + r() * 64, 36 + r() * 28, 2 + r() * 5, 0, 7); c.fill(); }
+    if (v === 2) {
+      c.strokeStyle = 'rgba(0,0,0,.7)'; c.lineWidth = 1.2; c.beginPath();
+      let x = ox + 10 + r() * 40, y = 0; c.moveTo(x, y);
+      while (y < 60) { x += r() * 8 - 4; y += 5 + r() * 5; c.lineTo(x, y); }
+      c.stroke();
+      const g = c.createLinearGradient(0, 8, 0, 56); g.addColorStop(0, 'rgba(120,0,0,.55)'); g.addColorStop(1, 'rgba(120,0,0,0)');
+      c.fillStyle = g; c.fillRect(ox + 40, 8, 3, 48);
+    }
+    const ao = c.createLinearGradient(0, 0, 0, 64);                  // dark where wall meets ceiling and floor
+    ao.addColorStop(0, 'rgba(0,0,0,.55)'); ao.addColorStop(.14, 'rgba(0,0,0,0)'); ao.addColorStop(.82, 'rgba(0,0,0,0)'); ao.addColorStop(1, 'rgba(0,0,0,.65)');
+    c.fillStyle = ao; c.fillRect(ox, 0, 64, 64); c.restore();
+  }
+});
+const mkDoor = on => makeImg(64, 64, c => {
+  for (let i = 0; i < 4; i++) {
+    const k = 50 + (i * 7) % 20;
+    c.fillStyle = on ? `rgb(${20 + k / 4 | 0},${k + 80},${50 + k / 3 | 0})` : `rgb(${k + 45},${k / 2 + 14 | 0},${k / 3 | 0})`;
+    c.fillRect(i * 16, 0, 16, 64); c.fillStyle = 'rgba(0,0,0,.5)'; c.fillRect(i * 16, 0, 1.5, 64);
+  }
+  c.fillStyle = '#15151a'; c.fillRect(0, 10, 64, 6); c.fillRect(0, 48, 64, 6);
+  c.fillStyle = '#555'; for (let x = 6; x < 64; x += 16) { c.fillRect(x, 12, 2, 2); c.fillRect(x, 50, 2, 2); }
+  c.fillStyle = on ? '#8dffb0' : '#c9a227'; c.beginPath(); c.arc(32, 32, 7, 0, 7); c.fill();
+  c.fillStyle = '#000'; c.fillRect(31, 30, 2, 7);
+  const ao = c.createLinearGradient(0, 0, 0, 64); ao.addColorStop(0, 'rgba(0,0,0,.5)'); ao.addColorStop(.15, 'rgba(0,0,0,0)'); ao.addColorStop(.85, 'rgba(0,0,0,0)'); ao.addColorStop(1, 'rgba(0,0,0,.6)');
+  c.fillStyle = ao; c.fillRect(0, 0, 64, 64);
+});
+const doorOn = mkDoor(true), doorOff = mkDoor(false);
+
+// Draws a picture standing in the world at (x, y). Only the columns not hidden by a wall are drawn.
+function drawSprite(img, x, y, wUnits, hUnits, lift, hz, opts) {
+  const dx = x - player.x, dy = y - player.y, ca = Math.cos(player.a), sa = Math.sin(player.a);
+  const depth = dx * ca + dy * sa; if (depth < .15) return;         // behind you
+  const lat = -dx * sa + dy * ca;
+  const sx = cv.width / 2 + lat / depth * proj;
+  const sh = hUnits * proj / depth, sw = wUnits * proj / depth;
+  const top = hz + (.5 - lift) * proj / depth - sh, left = sx - sw / 2;
+  const alpha = opts.fixed !== undefined ? opts.fixed : Math.max(opts.min || 0, lightAt(depth, lat / depth / planeLen));
+  const i0 = Math.max(0, Math.floor(left / colW)), i1 = Math.min(cols - 1, Math.floor((left + sw) / colW));
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  for (let i = i0; i <= i1; i++) {
+    if (depth >= zbuf[i]) continue;                                  // a wall is in front of this column
+    const u0 = Math.max(0, (i * colW - left) / sw), u1 = Math.min(1, ((i + 1) * colW - left) / sw);
+    if (u1 <= u0) continue;
+    ctx.drawImage(img, u0 * img.width, 0, Math.max(1, (u1 - u0) * img.width), img.height, i * colW, top, colW, sh);
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ============ DRAW ============ */
+function draw() {
+  const w = cv.width, h = cv.height;
+  const hz = h / 2 + Math.sin(walkT) * h * .006;                      // horizon line, bobs as you walk
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const mdd = Math.hypot(enemy.x - player.x, enemy.y - player.y);
+  if (state === 'play' && mdd < 0) ctx.setTransform(1, 0, 0, 1, (Math.random() - .5) * (7 - mdd) * .8, (Math.random() - .5) * (7 - mdd) * .8);   // screen shake when he is close
+  ctx.fillStyle = '#030304'; ctx.fillRect(0, 0, w, h);
+  if (cfg.q > 0) castFloor(w, h, hz);
+  else { const f = Math.round(26 * flick), g = ctx.createLinearGradient(0, hz, 0, h); g.addColorStop(0, '#000'); g.addColorStop(1, `rgb(${f},${f},${f + 6})`); ctx.fillStyle = g; ctx.fillRect(0, hz, w, h - hz); }
+
+  // walls: one ray per strip of screen
+  const ca = Math.cos(player.a), sa = Math.sin(player.a), px = -sa * planeLen, py = ca * planeLen;
+  ctx.imageSmoothingEnabled = false;
+  for (let i = 0; i < cols; i++) {
+    const camX = 2 * (i + .5) / cols - 1;
+    let rx = ca + px * camX, ry = sa + py * camX;
+    if (rx === 0) rx = 1e-9; if (ry === 0) ry = 1e-9;
+    cast(rx, ry); zbuf[i] = R.d;
+    const lh = proj / R.d;                                            // closer wall = taller strip
+    let l = lightAt(R.d, camX);
+    const top = hz - lh / 2, door = R.type === 2;
+    if (door && got >= 3) l = Math.max(l, .55);
+    if (R.side) l *= .72;
+    if (R.wx < .02 || R.wx > .98) l *= .7;
+    const vx = door ? 0 : Math.floor(hash(R.mx, R.my) * 3) * 64;
+    ctx.drawImage(door ? (got >= 3 ? doorOn : doorOff) : wallTex, vx + Math.min(63, R.wx * 64 | 0), 0, 1, 64, i * colW, top, colW, lh);
+    ctx.fillStyle = `rgba(2,2,6,${1 - l})`; ctx.fillRect(i * colW, top, colW, lh);
+  }
+
+  ctx.imageSmoothingEnabled = true;
+  // sprites, farthest first
+  const list = keys.map(k => ({ x: k.x, y: k.y, k })); if (mode === 'pvp') remotes().forEach(r => list.push({ x: r.x, y: r.y, r })); else list.push({ x: enemy.x, y: enemy.y, m: 1 }); cells.forEach(c => list.push({ x: c.x, y: c.y, b: 1 })); spots.forEach(c => list.push({ x: c.x, y: c.y, h: 1 })); notes.forEach(c => list.push({ x: c.x, y: c.y, n: 1 })); coinsM.forEach(c => list.push({ x: c.x, y: c.y, c: 1 })); traps.forEach(c => list.push({ x: c.x, y: c.y, t: 1 }));
+  const d2 = s => (s.x - player.x) ** 2 + (s.y - player.y) ** 2;
+  list.sort((a, b) => d2(b) - d2(a));
+  for (const s of list) {
+    if (s.m) {
+      const mf = monFr[enemy.stun > 0 && enemy.mode === 'chase' ? 24 : (enemy.mode === 'chase' ? 12 : 0) + (time * (enemy.mode === 'chase' ? 12 : 5) | 0) % 12], lf = .02 * Math.abs(Math.sin(time * 4));
+      drawSprite(mf.b, s.x, s.y, .63, .9, lf, hz, { min: 0 });
+      const dist = Math.sqrt(d2(s));
+      if (dist < 6) drawSprite(mf.e, s.x, s.y, .63, .9, lf, hz, { fixed: Math.min(1, (1 - dist / 6) * 1.2 + .15) * (.8 + .2 * Math.sin(time * 9)) }); // eyes glow in the dark
+    } else if (s.r) {
+      drawSprite(avatar(s.r.c, s.r.mv ? (time * 8 | 0) % 4 : 1), s.x, s.y, .5, .9, 0, hz, { min: .4 });
+    } else if (s.c) {
+      drawSprite(coinImg, s.x, s.y, .16, .2, .1 + Math.sin(time * 4 + s.x) * .03, hz, { min: .5 });
+    } else if (s.t) {
+      drawSprite(trapImg, s.x, s.y, .3, .12, 0, hz, { min: .3 });
+    } else if (s.h) {
+      drawSprite(lockImg, s.x, s.y, .5, .85, 0, hz, { min: .15 });
+    } else if (s.n) {
+      drawSprite(pageImg, s.x, s.y, .22, .3, .18 + Math.sin(time * 2 + s.x) * .03, hz, { min: .45 });
+    } else if (s.b) {
+      drawSprite(batImg, s.x, s.y, .22, .3, .12 + Math.sin(time * 3 + s.x) * .03, hz, { min: .4 });
+    } else {
+      const dist = Math.sqrt(d2(s)), spin = .35 + .65 * Math.abs(Math.cos(time * 2 + s.k.ph));
+      drawSprite(keyImg, s.x, s.y, .4 * spin, .4, .3 + Math.sin(time * 2.5 + s.k.ph) * .05, hz, { min: Math.max(0, .4 * (1 - dist / 9)) });
+    }
+  }
+
+  ctx.globalCompositeOperation = 'lighter';
+  const bl = ctx.createRadialGradient(w / 2, hz, 0, w / 2, hz, h * .75 * (.4 + .6 * batt)); bl.addColorStop(0, `rgba(255,190,120,${.1 * flick})`); bl.addColorStop(1, 'rgba(255,190,120,0)'); ctx.fillStyle = bl; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#ffd9a0'; for (const d of dust) { ctx.globalAlpha = .3 * Math.max(0, 1 - Math.hypot(d.x - .5, d.y - .5) * 2.2) * (.4 + d.s * .6); ctx.fillRect((d.x + Math.sin(time * .4 + d.s * 9) * .02) * w, ((d.y + time * .012 * (.3 + d.s)) % 1) * h, 1.6, 1.6); }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = .07; ctx.drawImage(grainC, -Math.random() * 128, -Math.random() * 128, w + 128, h + 128); ctx.globalAlpha = 1;   // film grain
+  if (0) { ctx.fillStyle = `rgba(120,0,0,${.28 * (1 - mdd / 8)})`; ctx.fillRect(0, 0, w, h); }
+  if (hurtT > 0) { ctx.fillStyle = `rgba(160,0,0,${hurtT})`; ctx.fillRect(0, 0, w, h); }
+  if (flashT > 0) { ctx.fillStyle = `rgba(255,250,220,${Math.min(1, flashT)})`; ctx.fillRect(0, 0, w, h); }
+  ctx.fillStyle = vig; ctx.fillRect(0, 0, w, h);
+  if (hid) { ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, w, h); ctx.fillStyle = 'rgba(8,4,2,.92)'; const n = 16; for (let i = 0; i < n; i++) ctx.fillRect(i * w / n, 0, w / n * .55, h); }   // peeking through cabinet slats                      // dark edges
+
+  const mdist = Math.hypot(enemy.x - player.x, enemy.y - player.y);
+  if (state === 'play' && mdist < 5) {                                // screen flushes red when the monster is near
+    ctx.fillStyle = `rgba(150,0,0,${(1 - mdist / 5) * .35})`; ctx.fillRect(0, 0, w, h);
+  }
+
+  if (joy) {                                                          // on-screen joystick
+    const jx = joy.x - joy.ox, jy = joy.y - joy.oy, k = Math.min(1, 60 / (Math.hypot(jx, jy) || 1));
+    ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 60, 0, 7); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.3)';
+    ctx.beginPath(); ctx.arc(joy.ox + jx * k, joy.oy + jy * k, 24, 0, 7); ctx.fill();
+  }
+
+  // HUD
+  const sx = w / 2, sy = h / 2;
+  ctx.font = '16px monospace'; ctx.textAlign = 'left'; ctx.fillStyle = '#ccc';
+  ctx.fillText(mode === 'pvp' ? 'HP ' + Math.max(0, php | 0) + '   Kills ' + kills + '/10' : 'Keys: ' + got + '/3  Pages: ' + pages + '/' + notesTot, 16, 28); if (mode === 'pvp' && state === 'play') pvpHud(w, h);
+  const bar = (y, v, c) => { ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(16, y, 100, 6); ctx.fillStyle = c; ctx.fillRect(16, y, 100 * v, 6); };
+  bar(40, stam, tired ? '#c0392b' : '#3498db'); bar(52, batt, batt < .25 ? '#e67e22' : '#f1c40f');
+  ctx.font = '11px monospace'; ctx.fillStyle = '#999'; ctx.fillText('SPRINT', 122, 47); ctx.fillText('LIGHT', 122, 59);
+  ctx.font = '16px monospace'; ctx.fillStyle = '#ccc'; ctx.textAlign = 'right'; ctx.fillText(fmt(runT), w - 16, 28); ctx.textAlign = 'left';
+  if (state === 'play') {
+    const c = CHR(); ctx.font = '14px monospace'; ctx.fillStyle = abCd > 0 ? '#888' : '#8fd';
+    ctx.fillText('[F] ' + c.ab + (abCd > 0 ? ' ' + Math.ceil(abCd) + 's' : ' READY') + (c.id === 'oswald' ? '  traps ' + trapCh : '') + (shield ? '  shield' : ''), 16, h - 24);
+    ctx.fillStyle = '#f1c40f'; ctx.fillText('Coins +' + runCoins, 16, h - 44);
+    ctx.textAlign = 'right'; ctx.fillStyle = '#ddd'; ctx.font = '13px monospace'; ctx.fillText('[B] BACK', w - 16, 52); ctx.textAlign = 'left'; ctx.font = '14px monospace';
+    if (touchMode) { ctx.strokeStyle = abCd > 0 ? '#666' : '#8fd'; ctx.beginPath(); ctx.arc(w - 60, h - 190, 36, 0, 7); ctx.stroke(); ctx.textAlign = 'center'; ctx.fillStyle = ctx.strokeStyle; ctx.font = '11px monospace'; ctx.fillText(abCd > 0 ? Math.ceil(abCd) + 's' : c.ab.toUpperCase(), w - 60, h - 186); ctx.textAlign = 'left'; ctx.font = '16px monospace'; }
+  }
+  if (state === 'play' && (hid || nearSpot())) {
+    ctx.fillStyle = '#e8d9a0'; ctx.textAlign = 'center';
+    if (touchMode) { ctx.strokeStyle = '#e8d9a0'; ctx.beginPath(); ctx.arc(w - 60, h - 80, 40, 0, 7); ctx.stroke(); ctx.fillText(hid ? 'LEAVE' : 'HIDE', w - 60, h - 75); }
+    else ctx.fillText('H / Space: ' + (hid ? 'leave hiding place' : 'hide'), sx, h - 110);
+    ctx.textAlign = 'left';
+  }
+  if (msgT > 0 && state === 'play') { ctx.textAlign = 'center'; ctx.globalAlpha = Math.min(1, msgT); wrap(msg, sx, h - 70, w * .85, 22); ctx.globalAlpha = 1; }
+
+  if (state === 'menu' || state === 'settings' || state === 'store' || state === 'forge' || state === 'arena') { drawMenu(w, h); return; }
+  if (state === 'intro') {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+    const fs = Math.min(26, w / 20);
+    ctx.globalAlpha = Math.min(1, introT / 1.2); ctx.textAlign = 'center'; ctx.fillStyle = '#c9c3b8'; ctx.font = 'italic ' + fs + 'px Georgia, serif';
+    wrap(INTRO[introI], sx, sy - 30, w * .8, fs * 1.5);
+    ctx.globalAlpha = 1; ctx.fillStyle = '#777'; ctx.font = '14px monospace'; ctx.fillText('click or tap to continue', sx, h - 40);
+    return;
+  }
+  if (state !== 'play') {
+    ctx.fillStyle = state === 'dead' ? 'rgba(80,0,0,.85)' : 'rgba(0,0,0,.8)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = state === 'win' ? '#2ecc71' : '#e74c3c';
+    ctx.font = 'bold ' + Math.min(48, w / 11) + 'px Georgia, serif';
+    ctx.fillText({ menu: 'DARK HALLS', pause: 'PAUSED', dead: mode === 'pvp' ? 'MATCH OVER' : 'YOU WERE CAUGHT', win: mode === 'pvp' ? 'VICTORY' : 'YOU ESCAPED' }[state], sx, sy - 20);
+    ctx.fillStyle = '#ccc'; ctx.font = Math.min(16, w / 40) + 'px monospace';
+    if (state === 'menu') {
+      ctx.fillText('Computer: WASD move, Shift sprint (loud!), mouse look, Esc pause.', sx, sy + 20);
+      ctx.fillText('Phone: drag left to move (push far to sprint), drag right to look.', sx, sy + 46);
+      ctx.fillText('Collect 3 keys, then reach the green door. Click or tap to start.', sx, sy + 72);
+    } else {
+      ctx.font = 'italic ' + Math.min(18, w / 26) + 'px Georgia, serif'; ctx.fillStyle = '#d8d0c4';
+      let y2 = wrap(state === 'dead' || mode === 'pvp' ? deadLine : state === 'win' ? (pages >= notesTot ? WIN2 : WIN) + '  Time ' + fmt(runT) + (newBest ? ' (new best!)' : ' | Best ' + fmt(best)) : 'Catch your breath. He is still out there.', sx, sy + 20, w * .75, 26);
+      ctx.font = '15px monospace';
+      if (state === 'dead' || state === 'win') { ctx.fillStyle = '#e8c860'; ctx.fillText('+' + earned + ' coins (total ' + sv.coins + ')' + (sv.streak > 1 ? '   win streak x' + sv.streak : '') + '   run #' + sv.runs, sx, y2 + 8); y2 += 26; }
+      ctx.fillStyle = '#888'; ctx.font = '14px monospace';
+      ctx.fillText(state === 'pause' ? 'Click or tap to resume' : 'Click or tap to play again', sx, y2 + 14);
+      ctx.textAlign = 'right'; ctx.fillText('[M] MENU', w - 16, 36); ctx.textAlign = 'center';
+    }
+  }
+}
+
+/* ============ SOUND (all made with code, no files) ============ */
+let AC, master, noiseBuf, monG, monP, creakT = 8;
+function initAudio() {
+  if (AC) return;
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  master = AC.createGain(); master.gain.value = cfg.vol; master.connect(AC.destination);
+  noiseBuf = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
+  const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+  const lp = AC.createBiquadFilter(), dg = AC.createGain(), lfo = AC.createOscillator(), lg = AC.createGain();   // ambient drone
+  lp.type = 'lowpass'; lp.frequency.value = 160; dg.gain.value = .05;
+  [41, 41.7].forEach(f => { const o = AC.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.connect(lp); o.start(); });
+  lfo.frequency.value = .07; lg.gain.value = 70; lfo.connect(lg).connect(lp.frequency); lfo.start();
+  lp.connect(dg).connect(master);
+  const mo = AC.createOscillator(), mf = AC.createBiquadFilter(), gl = AC.createOscillator(), gg = AC.createGain();   // monster growl
+  monG = AC.createGain(); monP = AC.createStereoPanner();
+  mo.type = 'sawtooth'; mo.frequency.value = 58; mf.type = 'lowpass'; mf.frequency.value = 220; monG.gain.value = 0;
+  gl.frequency.value = 6; gg.gain.value = 12; gl.connect(gg).connect(mo.frequency); gl.start();
+  mo.connect(mf).connect(monG).connect(monP).connect(master); mo.start();
+}
+function tone(f, d, type = 'sine', v = .2, when = 0, slide = 0) {
+  if (!AC) return;
+  const t = AC.currentTime + when, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + d);
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.001, t + d);
+  o.connect(g).connect(master); o.start(t); o.stop(t + d);
+}
+function noise(d, f, v, q = 1, pan = 0, when = 0) {
+  if (!AC) return;
+  const t = AC.currentTime + when, src = AC.createBufferSource(), bp = AC.createBiquadFilter(), g = AC.createGain(), p = AC.createStereoPanner();
+  src.buffer = noiseBuf; src.loop = true; bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = q; p.pan.value = pan;
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.001, t + d);
+  src.connect(bp).connect(g).connect(p).connect(master); src.start(t, Math.random()); src.stop(t + d);
+}
+function thump() { tone(55, .15, 'sine', .5); setTimeout(() => tone(48, .15, 'sine', .4), 160); }
+function step() { noise(.09, 220 + Math.random() * 80, .5, .8, (Math.random() - .5) * .2); tone(70, .08, 'sine', .12); }
+function chime() { [784, 988, 1319].forEach((f, i) => tone(f, .9, 'triangle', .13, i * .09)); }
+function unlockSnd() { tone(60, .6, 'square', .25); noise(.4, 900, .5, 3, 0, .05); tone(220, 1.4, 'sawtooth', .1, .3, 440); }
+function scare() { tone(220, .5, 'triangle', .2, 0, 110); }
+function winSnd() { [262, 330, 392, 523].forEach((f, i) => tone(f, 2.2, 'triangle', .14, i * .22)); }
+function monAudio(dist, dt) {                    // growl gets louder and pans toward the monster; random creaks and whispers
+  if (!AC) return;
+  const dx = enemy.x - player.x, dy = enemy.y - player.y, lat = -dx * Math.sin(player.a) + dy * Math.cos(player.a);
+  monG.gain.setTargetAtTime(Math.max(0, 1 - dist / 10) ** 2 * .45, AC.currentTime, .1);
+  monP.pan.setTargetAtTime(Math.max(-1, Math.min(1, lat / (dist || 1))), AC.currentTime, .1);
+  if ((creakT -= dt) <= 0) {
+    creakT = 6 + Math.random() * 9;
+    if (Math.random() < .5) tone(150 + Math.random() * 60, 1.1, 'sawtooth', .04, 0, 90); else noise(1.4, 2500, .05, 6, Math.random() * 2 - 1);
+  }
+}
+function wrap(t, x, y, mw, lh) {                 // draws text that wraps to a max width, returns next y
+  let line = '';
+  for (const wd of t.split(' ')) {
+    const tt = line + wd + ' ';
+    if (ctx.measureText(tt).width > mw && line) { ctx.fillText(line, x, y); y += lh; line = wd + ' '; } else line = tt;
+  }
+  ctx.fillText(line, x, y); return y + lh;
+}
+function toMenu() { room?.presence({ ar: 0, hp: 0 }); state = 'menu'; try { document.exitPointerLock(); } catch (e) {} }
+function saveCfg() { try { localStorage.setItem('dh_cfg', JSON.stringify(cfg)); } catch (e) {} }
+function uiClick(x, y) { for (const b of btns) if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) { b.f(); saveCfg(); saveSv(); return; } }
+function tapUI(x, y) {
+  if (state === 'menu' || state === 'settings' || state === 'store' || state === 'forge' || state === 'arena') { uiClick(x, y); return true; }
+  if ((state === 'pause' || state === 'dead' || state === 'win') && x > innerWidth - 110 && y < 60) { toMenu(); return true; }
+  return false;
+}
+function nearSpot() { return spots.find(p => Math.hypot(p.x - player.x, p.y - player.y) < 1); }
+function toggleHide() {
+  if (hid) { hid = null; noise(.3, 400, .3); return; }
+  const p = nearSpot(); if (!p) return;
+  if (enemy.mode === 'chase' && Math.hypot(enemy.x - player.x, enemy.y - player.y) < D().sight && canSee(enemy.x, enemy.y, player.x, player.y)) { say("He's watching you. You can't hide!", 2); return; }
+  hid = p; player.x = p.x; player.y = p.y; noise(.3, 400, .3);
+}
+addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; });
+function drawMenu(w, h) {                          // title, settings and character store
+  btns = [];
+  ctx.fillStyle = 'rgba(0,0,0,.84)'; ctx.fillRect(0, 0, w, h);
+  const st = state === 'store', fg = state === 'forge', many = st || fg, sx = w / 2, bw = Math.min(many ? 440 : 320, w * .9), bh = Math.min(fg ? 34 : 40, h / (fg ? 16 : st ? 13 : 14));
+  let y = h * (fg ? .2 : st ? .27 : .3); ctx.textAlign = 'center';
+  ctx.fillStyle = '#b02020'; ctx.font = 'bold ' + Math.min(st ? 44 : 64, w / 9) + 'px Georgia, serif'; ctx.fillText(state === 'arena' ? 'ARENA' : fg ? 'HERO FORGE' : st ? 'STORE' : state === 'menu' ? 'DARK HALLS' : 'SETTINGS', sx, y - bh * 1.2);
+  ctx.fillStyle = many ? '#f1c40f' : '#8a8478'; ctx.font = (many ? '' : 'italic ') + Math.min(18, w / 26) + (many ? 'px monospace' : 'px Georgia, serif'); ctx.fillText(many ? 'Coins: ' + sv.coins : state === 'menu' ? 'Escape Runs   |   Coins: ' + sv.coins : '', sx, y - bh * .55);
+  const own = c => sv.owned.includes(c.id) || c.id === 'custom';
+  const items = state === 'arena' ? ARENA() : fg ? FORGE() : st ? STORECH().map(c => [c.n + ' · ' + c.ab + '  ' + (own(c) ? (sv.sel === c.id ? 'EQUIPPED' : 'OWNED') : c.cost + 'c'), () => {
+      if (own(c)) { sv.sel = c.id; storeMsg = ''; } else if (sv.coins >= c.cost) { sv.coins -= c.cost; sv.owned.push(c.id); sv.sel = c.id; storeMsg = 'Unlocked ' + c.n + '!'; tone(880, .15, 'square', .1); } else storeMsg = 'Not enough coins. Escape more runs!';
+    }]).concat([['Back', () => state = bk()]])
+    : state === 'menu' ? [['PLAY: Maze Escape', () => begin()], ['PLAY: Arena (vs bots)', () => state = 'arena'], ['Character: ' + CHR().n, () => state = 'store'], ['Hero Forge (custom hero)', () => state = 'forge'], ['Difficulty: ' + D().n, () => cfg.diff = (cfg.diff + 1) % 3], ['Settings', () => state = 'settings']]
+    : [['Volume: ' + Math.round(cfg.vol * 100) + '%', () => { cfg.vol = cfg.vol >= 1 ? 0 : Math.round((cfg.vol + .2) * 10) / 10; if (master) master.gain.value = cfg.vol; }],
+       ['Look speed: ' + cfg.sens + 'x', () => cfg.sens = SENS[(SENS.indexOf(cfg.sens) + 1) % SENS.length]],
+       ['Graphics: ' + ['Low', 'Medium', 'High'][cfg.q], () => { cfg.q = (cfg.q + 1) % 3; resize(); }],
+       ['Back', () => state = 'menu']];
+  let hov = -1;
+  items.forEach(([t, f], i) => {
+    const on = mx > sx - bw / 2 && mx < sx + bw / 2 && my > y && my < y + bh; if (on) hov = i;
+    ctx.fillStyle = on ? 'rgba(140,30,30,.9)' : 'rgba(30,30,36,.9)'; ctx.fillRect(sx - bw / 2, y, bw, bh);
+    ctx.strokeStyle = st && STORECH()[i] && sv.sel === STORECH()[i].id ? '#d4a017' : '#5a1a1a'; ctx.lineWidth = 2; ctx.strokeRect(sx - bw / 2, y, bw, bh);
+    ctx.fillStyle = '#ddd'; ctx.font = Math.min(bh * .42, bw * .94 / (t.length * .6)) + 'px monospace'; ctx.fillText(t, sx, y + bh * .64);
+    btns.push({ x: sx - bw / 2, y, w: bw, h: bh, f }); y += bh * 1.28;
+  });
+  ctx.fillStyle = '#9a9488'; ctx.font = Math.min(13, w / 34) + 'px monospace';
+  if (st) { const c = STORECH()[hov] || CHR(); wrap(c.d, sx, y + 8, bw, 18); if (storeMsg) { ctx.fillStyle = '#e8c860'; ctx.fillText(storeMsg, sx, y + 56); } }
+  else if (state === 'arena') wrap('Bot matches pay more coins on higher difficulties. Your custom hero fights here too.', sx, y + 6, bw, 17);
+  else if (fg) { ctx.fillText(sv.custom ? 'Gun, ability and upgrades only matter in Arena battles (ability also works in the maze).' : 'Build your own hero: pick a gun, ability and color, then upgrade it with coins.', sx, y + 6); if (storeMsg) { ctx.fillStyle = '#e8c860'; ctx.fillText(storeMsg, sx, y + 28); } }
+  else if (state === 'menu') {
+    ctx.fillText(D().d, sx, y + 6);
+    ctx.fillText('WASD move, Shift sprint, H hide, F ability, click shoots (Arena)', sx, y + 30);
+    ctx.fillText('Phone: left stick moves (push far = sprint), ability button above HIDE', sx, y + 48);
+  } else ctx.fillText('Changes save automatically.', sx, y + 6);
+}
+function begin() {                               // menu -> story pages -> game
+  if (state === 'menu') { if (sv.seen) start(); else { sv.seen = 1; state = 'intro'; introI = 0; introT = 0; } }
+  else if (state === 'intro') { if (++introI >= INTRO.length) start(); else introT = 0; }
+  else if (mode === 'pvp') startArena(); else start();
+}
+
+/* ============ INPUT + GAME LOOP ============ */
+function lock() { try { const p = cv.requestPointerLock && cv.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+addEventListener('keydown', e => { held[e.key.toLowerCase()] = 1; if (state === 'play' && !e.repeat && (e.key === 'h' || e.key === ' ')) toggleHide(); if (state === 'play' && !e.repeat && (e.key === 'q' || e.key === 'f')) useAbility(); if (e.key === 'm' && (state === 'pause' || state === 'dead' || state === 'win')) toMenu(); if (e.key === 'b' && state === 'play') toMenu(); if (e.key.startsWith('Arrow')) e.preventDefault(); });
+addEventListener('keyup', e => delete held[e.key.toLowerCase()]);
+addEventListener('blur', () => { held = {}; if (state === 'play') state = 'pause'; });
+addEventListener('mousemove', e => {                         // mouse look (pointer is locked to the game)
+  if (state !== 'play') return;
+  if (document.pointerLockElement === cv) player.a += e.movementX * .0022 * cfg.sens;
+  else if (e.buttons & 1) player.a += e.movementX * .004 * cfg.sens;    // fallback: drag to look if pointer lock isn't available
+});
+addEventListener('mousedown', e => {
+  initAudio();
+  if (state === 'play') { if (!touchMode && document.pointerLockElement !== cv) lock(); return; }
+  if (tapUI(e.clientX, e.clientY)) return;
+  if (state === 'pause') state = 'play'; else begin();
+  lock();
+});
+document.addEventListener('pointerlockchange', () => {      // Esc releases the mouse -> pause
+  if (!document.pointerLockElement && state === 'play' && !touchMode) state = 'pause';
+});
+
+/* touch: left half of the screen = joystick, right half = drag to look around */
+addEventListener('touchstart', e => {
+  e.preventDefault(); initAudio(); touchMode = true;
+  if (state !== 'play') { if (tapUI(e.changedTouches[0].clientX, e.changedTouches[0].clientY)) return; if (state === 'pause') state = 'play'; else begin(); return; }
+  for (const t of e.changedTouches) {
+    if (t.clientX > innerWidth - 120 && t.clientY < innerHeight - 140 && t.clientY > innerHeight - 240) { useAbility(); continue; }
+    if (t.clientX > innerWidth - 120 && t.clientY > innerHeight - 140 && (hid || nearSpot())) { toggleHide(); continue; }
+    if (t.clientX < innerWidth / 2 && !joy) joy = { id: t.identifier, ox: t.clientX, oy: t.clientY, x: t.clientX, y: t.clientY };
+    else if (t.clientX >= innerWidth / 2 && !aim) aim = { id: t.identifier, lx: t.clientX };
+  }
+}, { passive: false });
+addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (joy && t.identifier === joy.id) { joy.x = t.clientX; joy.y = t.clientY; }
+    if (aim && t.identifier === aim.id) { if (state === 'play') player.a += (t.clientX - aim.lx) * .007 * cfg.sens; aim.lx = t.clientX; }
+  }
+}, { passive: false });
+function touchEnd(e) {
+  for (const t of e.changedTouches) {
+    if (joy && t.identifier === joy.id) joy = null;
+    if (aim && t.identifier === aim.id) aim = null;
+  }
+}
+addEventListener('touchend', touchEnd); addEventListener('touchcancel', touchEnd);
+
+start(); state = 'menu';
+let last = performance.now();
+(function loop(t) {
+  const dt = Math.min(.05, (t - last) / 1000); last = t; time = t / 1000;
+  if (state === 'play') update(dt); else { if (monG) monG.gain.value = 0; if (state === 'intro') introT += dt; }
+  draw();
+  requestAnimationFrame(loop);
+})(last);
+</script>
+</body>
+</html>
